@@ -30,7 +30,7 @@ const PREALLOC_ADAPTERS_LEN: usize = 15 * 1024;
 
 use crate::ifaces::{Interface, Kind, NextHop};
 
-#[link(name = "iphlpapi")]
+#[link(name = "Iphlpapi")]
 extern "system" {
     pub fn GetAdaptersAddresses(
         family: ULONG,

@@ -10,6 +10,8 @@ use std::sync::atomic::AtomicBool;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch, Mutex};
 
+use nix::sys::socket::{self, sockopt};
+
 const RECEIVE_MTU: usize = 8192;
 const DEFAULT_LISTEN_BACKLOG: usize = 128; // same as Linux default
 
@@ -100,37 +102,51 @@ impl ListenConfig {
             self.backlog = DEFAULT_LISTEN_BACKLOG;
         }
 
-        let pconn = Arc::new(UdpSocket::bind(laddr).await?);
-        let (accept_ch_tx, accept_ch_rx) = mpsc::channel(self.backlog);
-        let (done_ch_tx, done_ch_rx) = watch::channel(());
+        let mut bind_addrs = tokio::net::lookup_host(laddr).await?;
+        if let Some(bind_addr) = bind_addrs.next() {
+            let pconn_std_sock = std::net::UdpSocket::bind(bind_addr)?;
+            let receive_buf_size = 20*1024*1024;  //20 MB
+            
+            #[cfg(any(target_os = "linux"))]
+            socket::setsockopt(pconn_std_sock.as_raw_fd(), libc::SO_RCVBUF, &receive_buf_size)?;
+            
+            pconn_std_sock.set_nonblocking(true)?;
+            let udp_socket = UdpSocket::from_std(pconn_std_sock)?;
 
-        let l = ListenerImpl {
-            pconn,
-            accepting: Arc::new(AtomicBool::new(true)),
-            accept_ch_tx: Arc::new(Mutex::new(Some(accept_ch_tx))),
-            done_ch_tx: Arc::new(Mutex::new(Some(done_ch_tx))),
-            ch_rx: Arc::new(Mutex::new((accept_ch_rx, done_ch_rx.clone()))),
-            conns: Arc::new(Mutex::new(HashMap::new())),
-        };
+            let pconn = Arc::new(udp_socket);
+            let (accept_ch_tx, accept_ch_rx) = mpsc::channel(self.backlog);
+            let (done_ch_tx, done_ch_rx) = watch::channel(());
 
-        let pconn = Arc::clone(&l.pconn);
-        let accepting = Arc::clone(&l.accepting);
-        let accept_filter = self.accept_filter.take();
-        let accept_ch_tx = Arc::clone(&l.accept_ch_tx);
-        let conns = Arc::clone(&l.conns);
-        tokio::spawn(async move {
-            ListenConfig::read_loop(
-                done_ch_rx,
+            let l = ListenerImpl {
                 pconn,
-                accepting,
-                accept_filter,
-                accept_ch_tx,
-                conns,
-            )
-            .await;
-        });
+                accepting: Arc::new(AtomicBool::new(true)),
+                accept_ch_tx: Arc::new(Mutex::new(Some(accept_ch_tx))),
+                done_ch_tx: Arc::new(Mutex::new(Some(done_ch_tx))),
+                ch_rx: Arc::new(Mutex::new((accept_ch_rx, done_ch_rx.clone()))),
+                conns: Arc::new(Mutex::new(HashMap::new())),
+            };
 
-        Ok(l)
+            let pconn = Arc::clone(&l.pconn);
+            let accepting = Arc::clone(&l.accepting);
+            let accept_filter = self.accept_filter.take();
+            let accept_ch_tx = Arc::clone(&l.accept_ch_tx);
+            let conns = Arc::clone(&l.conns);
+            tokio::spawn(async move {
+                ListenConfig::read_loop(
+                    done_ch_rx,
+                    pconn,
+                    accepting,
+                    accept_filter,
+                    accept_ch_tx,
+                    conns,
+                )
+                .await;
+            });
+
+            return Ok(l);
+        }else{
+            return Err(Error::ErrNoAddressAssigned);
+        }
     }
 
     /// read_loop has to tasks:

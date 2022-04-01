@@ -4,7 +4,10 @@ fn main() {
         .contains("android")
     {
         cc::Build::new()
-            .file("src/ifaces/ffi/android/ifaddrs.c")
+            .cpp(true)
+            .shared_flag(true)
+            .cpp_link_stdlib("c++_shared")
+            .file("src/ifaces/ffi/android/ifaddrs.cpp")
             .compile("ifaddrs-android");
     }
 }

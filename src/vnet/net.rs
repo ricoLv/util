@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
+use nix::sys::socket::{self, sockopt};
 
 pub(crate) const LO0_STR: &str = "lo0";
 pub(crate) const UDP_STR: &str = "udp";
@@ -552,7 +553,15 @@ impl Net {
                 };
                 let local_addr = SocketAddr::new(any_ip, 0);
 
-                let conn = UdpSocket::bind(local_addr).await?;
+
+                let conn_std_sock = std::net::UdpSocket::bind(local_addr)?;
+                let receive_buf_size = 20*1024*1024;  //20 MB
+                // socket::set_opt(std_sock.as_raw_fd(), SO_SNDBUF, size as c_int)
+                #[cfg(any(target_os = "linux"))]
+                socket::setsockopt(conn_std_sock.as_raw_fd(), libc::SO_RCVBUF, &receive_buf_size)?;
+                
+                conn_std_sock.set_nonblocking(true)?;
+                let conn = UdpSocket::from_std(conn_std_sock)?;
                 conn.connect(remote_addr).await?;
 
                 Ok(Arc::new(conn))
